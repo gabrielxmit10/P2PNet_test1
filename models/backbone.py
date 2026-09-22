@@ -9,8 +9,6 @@ import torch.nn.functional as F
 import torchvision
 from torch import nn
 
-import models.vgg_ as models
-
 class BackboneBase_VGG(nn.Module):
     def __init__(self, backbone: nn.Module, num_channels: int, name: str, return_interm_layers: bool):
         super().__init__()
@@ -50,19 +48,30 @@ class BackboneBase_VGG(nn.Module):
 
 
 class Backbone_VGG(BackboneBase_VGG):
-    """ResNet backbone with frozen BatchNorm."""
-    def __init__(self, name: str, return_interm_layers: bool):
+    """VGG backbone used by the original P2PNet architecture."""
+    def __init__(self, name: str, return_interm_layers: bool, pretrained: bool = True):
         if name == 'vgg16_bn':
-            backbone = models.vgg16_bn(pretrained=True)
+            try:
+                weights = torchvision.models.VGG16_BN_Weights.IMAGENET1K_V1 if pretrained else None
+                backbone = torchvision.models.vgg16_bn(weights=weights)
+            except AttributeError:  # torchvision < 0.13
+                backbone = torchvision.models.vgg16_bn(pretrained=pretrained)
         elif name == 'vgg16':
-            backbone = models.vgg16(pretrained=True)
+            try:
+                weights = torchvision.models.VGG16_Weights.IMAGENET1K_V1 if pretrained else None
+                backbone = torchvision.models.vgg16(weights=weights)
+            except AttributeError:  # torchvision < 0.13
+                backbone = torchvision.models.vgg16(pretrained=pretrained)
+        else:
+            raise ValueError("Unsupported backbone: {}".format(name))
         num_channels = 256
         super().__init__(backbone, num_channels, name, return_interm_layers)
 
 
 def build_backbone(args):
-    backbone = Backbone_VGG(args.backbone, True)
+    pretrained = getattr(args, 'pretrained_backbone', True)
+    backbone = Backbone_VGG(args.backbone, True, pretrained=pretrained)
     return backbone
 
 if __name__ == '__main__':
-    Backbone_VGG('vgg16', True)
+    Backbone_VGG('vgg16', True, pretrained=False)

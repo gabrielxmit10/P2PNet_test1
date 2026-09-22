@@ -76,13 +76,16 @@ def vis(samples, targets, pred, vis_dir, des=None):
 # the training routine
 def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     data_loader: Iterable, optimizer: torch.optim.Optimizer,
-                    device: torch.device, epoch: int, max_norm: float = 0):
+                    device: torch.device, epoch: int, max_norm: float = 0,
+                    max_steps: int = 0, print_freq: int = 20):
     model.train()
     criterion.train()
     metric_logger = utils.MetricLogger(delimiter="  ")
     metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
     # iterate all training samples
-    for samples, targets in data_loader:
+    for step, (samples, targets) in enumerate(data_loader):
+        if max_steps > 0 and step >= max_steps:
+            break
         samples = samples.to(device)
         targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
         # forward
@@ -115,6 +118,8 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
         # update logger
         metric_logger.update(loss=loss_value, **loss_dict_reduced_scaled, **loss_dict_reduced_unscaled)
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
+        if print_freq > 0 and (step % print_freq == 0):
+            print("epoch={} step={} {}".format(epoch, step, metric_logger))
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
     print("Averaged stats:", metric_logger)
@@ -122,7 +127,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
 
 # the inference routine
 @torch.no_grad()
-def evaluate_crowd_no_overlap(model, data_loader, device, vis_dir=None):
+def evaluate_crowd_no_overlap(model, data_loader, device, vis_dir=None, threshold=0.5):
     model.eval()
 
     metric_logger = utils.MetricLogger(delimiter="  ")
@@ -139,9 +144,6 @@ def evaluate_crowd_no_overlap(model, data_loader, device, vis_dir=None):
         outputs_points = outputs['pred_points'][0]
 
         gt_cnt = targets[0]['point'].shape[0]
-        # 0.5 is used by default
-        threshold = 0.5
-
         points = outputs_points[outputs_scores > threshold].detach().cpu().numpy().tolist()
         predict_cnt = int((outputs_scores > threshold).sum())
         # if specified, save the visualized images

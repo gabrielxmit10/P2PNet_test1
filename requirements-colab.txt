@@ -1,0 +1,7 @@
+# PyTorch and torchvision are provided by the Colab runtime.  Do not replace
+# them with the repository's historical PyTorch 1.5 environment.
+numpy>=1.26,<3
+scipy>=1.10
+Pillow>=10
+opencv-python-headless>=4.8
+tensorboard>=2.15

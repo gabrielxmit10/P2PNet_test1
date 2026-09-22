@@ -146,11 +146,9 @@ class AnchorPoints(nn.Module):
             all_anchor_points = np.append(all_anchor_points, shifted_anchor_points, axis=0)
 
         all_anchor_points = np.expand_dims(all_anchor_points, axis=0)
-        # send reference points to device
-        if torch.cuda.is_available():
-            return torch.from_numpy(all_anchor_points.astype(np.float32)).cuda()
-        else:
-            return torch.from_numpy(all_anchor_points.astype(np.float32))
+        # Follow the input device. The original code used CUDA whenever it was
+        # available, which broke explicit CPU inference on GPU machines.
+        return torch.from_numpy(all_anchor_points.astype(np.float32)).to(image.device)
 
 class Decoder(nn.Module):
     def __init__(self, C3_size, C4_size, C5_size, feature_size=256):
@@ -332,7 +330,10 @@ def build(args, training):
     if not training: 
         return model
 
-    weight_dict = {'loss_ce': 1, 'loss_points': args.point_loss_coef}
+    # Keep the key identical to loss_points()'s returned ``loss_point``.  The
+    # upstream typo (``loss_points``) silently excluded localization loss from
+    # the optimized total.
+    weight_dict = {'loss_ce': 1, 'loss_point': args.point_loss_coef}
     losses = ['labels', 'points']
     matcher = build_matcher_crowd(args)
     criterion = SetCriterion_Crowd(num_classes, \

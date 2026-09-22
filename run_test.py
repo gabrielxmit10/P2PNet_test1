@@ -1,102 +1,130 @@
+"""Single-image or directory inference for P2PNet."""
+
+from __future__ import annotations
+
 import argparse
-import datetime
-import random
+import csv
 import time
 from pathlib import Path
 
-import torch
-import torchvision.transforms as standard_transforms
-import numpy as np
-
-from PIL import Image
 import cv2
-from crowd_datasets import build_dataset
-from engine import *
-from models import build_model
-import os
-import warnings
-warnings.filterwarnings('ignore')
+from PIL import Image
+
+from workflow_utils import (
+    create_model,
+    draw_prediction,
+    environment_report,
+    list_images,
+    predict_pil,
+    resolve_device,
+    save_json,
+)
+
 
 def get_args_parser():
-    parser = argparse.ArgumentParser('Set parameters for P2PNet evaluation', add_help=False)
-    
-    # * Backbone
-    parser.add_argument('--backbone', default='vgg16_bn', type=str,
-                        help="name of the convolutional backbone to use")
-
-    parser.add_argument('--row', default=2, type=int,
-                        help="row number of anchor points")
-    parser.add_argument('--line', default=2, type=int,
-                        help="line number of anchor points")
-
-    parser.add_argument('--output_dir', default='',
-                        help='path where to save')
-    parser.add_argument('--weight_path', default='',
-                        help='path where the trained weights saved')
-
-    parser.add_argument('--gpu_id', default=0, type=int, help='the gpu used for evaluation')
-
+    parser = argparse.ArgumentParser("P2PNet image/directory inference")
+    parser.add_argument("--input", default="./vis/demo1.jpg", help="image or directory")
+    parser.add_argument("--weight_path", required=True, help="compatible P2PNet checkpoint")
+    parser.add_argument("--output_dir", default="./outputs/inference")
+    parser.add_argument("--device", default="auto", help="auto, cpu, cuda, or cuda:N")
+    parser.add_argument("--backbone", default="vgg16_bn", choices=("vgg16_bn", "vgg16"))
+    parser.add_argument("--row", default=2, type=int)
+    parser.add_argument("--line", default=2, type=int)
+    parser.add_argument("--threshold", default=0.5, type=float)
+    parser.add_argument(
+        "--tile_size", default=1024, type=int,
+        help="tile side in pixels; <=0 processes the full image at once",
+    )
+    parser.add_argument("--tile_overlap", default=128, type=int)
+    parser.add_argument(
+        "--max_size", default=0, type=int,
+        help="optionally resize the longest image side before inference; 0 disables resizing",
+    )
+    parser.add_argument("--recursive", action="store_true")
+    parser.add_argument("--no_visualizations", action="store_true")
+    parser.add_argument("--limit", default=0, type=int, help="process only the first N images")
     return parser
 
-def main(args, debug=False):
 
-    os.environ["CUDA_VISIBLE_DEVICES"] = '{}'.format(args.gpu_id)
+def main(args):
+    device = resolve_device(args.device)
+    output_dir = Path(args.output_dir).expanduser().resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    visual_dir = output_dir / "visualizations"
+    if not args.no_visualizations:
+        visual_dir.mkdir(parents=True, exist_ok=True)
 
-    print(args)
-    device = torch.device('cuda')
-    # get the P2PNet
-    model = build_model(args)
-    # move to GPU
-    model.to(device)
-    # load trained model
-    if args.weight_path is not None:
-        checkpoint = torch.load(args.weight_path, map_location='cpu')
-        model.load_state_dict(checkpoint['model'])
-    # convert to eval mode
-    model.eval()
-    # create the pre-processing transform
-    transform = standard_transforms.Compose([
-        standard_transforms.ToTensor(), 
-        standard_transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-    ])
+    model = create_model(
+        args.weight_path,
+        device=device,
+        backbone=args.backbone,
+        row=args.row,
+        line=args.line,
+    )
+    images = list_images(args.input, recursive=args.recursive)
+    if args.limit > 0:
+        images = images[: args.limit]
 
-    # set your image path here
-    img_path = "./vis/demo1.jpg"
-    # load the images
-    img_raw = Image.open(img_path).convert('RGB')
-    # round the size
-    width, height = img_raw.size
-    new_width = width // 128 * 128
-    new_height = height // 128 * 128
-    img_raw = img_raw.resize((new_width, new_height), Image.ANTIALIAS)
-    # pre-proccessing
-    img = transform(img_raw)
+    rows = []
+    for index, image_path in enumerate(images, start=1):
+        started = time.perf_counter()
+        with Image.open(image_path) as handle:
+            image = handle.convert("RGB")
+        prediction = predict_pil(
+            model,
+            image,
+            device=device,
+            threshold=args.threshold,
+            tile_size=args.tile_size,
+            tile_overlap=args.tile_overlap,
+            max_size=args.max_size,
+        )
+        elapsed = time.perf_counter() - started
+        print(
+            f"[{index}/{len(images)}] {image_path.name}: count={prediction.count} "
+            f"tiles={prediction.tiles} time={elapsed:.2f}s"
+        )
+        rows.append(
+            {
+                "image": str(image_path),
+                "predicted_count": prediction.count,
+                "width": prediction.original_size[0],
+                "height": prediction.original_size[1],
+                "inference_width": prediction.inference_size[0],
+                "inference_height": prediction.inference_size[1],
+                "scale": prediction.scale,
+                "tiles": prediction.tiles,
+                "seconds": elapsed,
+            }
+        )
+        save_json(
+            output_dir / "points" / f"{index:06d}_{image_path.stem}.json",
+            {
+                **rows[-1],
+                "points": [
+                    {"x": float(point[0]), "y": float(point[1]), "score": float(score)}
+                    for point, score in zip(prediction.points, prediction.scores)
+                ],
+            },
+        )
+        if not args.no_visualizations:
+            canvas = draw_prediction(image, prediction)
+            cv2.imwrite(str(visual_dir / f"{index:06d}_{image_path.stem}_pred.jpg"), canvas)
 
-    samples = torch.Tensor(img).unsqueeze(0)
-    samples = samples.to(device)
-    # run inference
-    outputs = model(samples)
-    outputs_scores = torch.nn.functional.softmax(outputs['pred_logits'], -1)[:, :, 1][0]
+    with (output_dir / "predictions.csv").open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(rows)
+    save_json(
+        output_dir / "run.json",
+        {
+            "arguments": vars(args),
+            "environment": environment_report(Path(__file__).resolve().parent),
+            "images_processed": len(rows),
+        },
+    )
+    print(f"Saved inference outputs to {output_dir}")
 
-    outputs_points = outputs['pred_points'][0]
 
-    threshold = 0.5
-    # filter the predictions
-    points = outputs_points[outputs_scores > threshold].detach().cpu().numpy().tolist()
-    predict_cnt = int((outputs_scores > threshold).sum())
-
-    outputs_scores = torch.nn.functional.softmax(outputs['pred_logits'], -1)[:, :, 1][0]
-
-    outputs_points = outputs['pred_points'][0]
-    # draw the predictions
-    size = 2
-    img_to_draw = cv2.cvtColor(np.array(img_raw), cv2.COLOR_RGB2BGR)
-    for p in points:
-        img_to_draw = cv2.circle(img_to_draw, (int(p[0]), int(p[1])), size, (0, 0, 255), -1)
-    # save the visualized image
-    cv2.imwrite(os.path.join(args.output_dir, 'pred{}.jpg'.format(predict_cnt)), img_to_draw)
-
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser('P2PNet evaluation script', parents=[get_args_parser()])
-    args = parser.parse_args()
-    main(args)
+if __name__ == "__main__":
+    main(get_args_parser().parse_args())
