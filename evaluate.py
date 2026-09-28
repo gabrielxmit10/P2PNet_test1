@@ -46,58 +46,76 @@ def get_args_parser():
 
 
 def evaluate_dataset(model, dataset, device, args, output_dir: Path | None = None):
+    evaluation_started = time.perf_counter()
     errors = []
     rows = []
     visual_dir = output_dir / "visualizations" if output_dir else None
     if visual_dir and args.visualize_first > 0:
         visual_dir.mkdir(parents=True, exist_ok=True)
 
-    for index in range(len(dataset)):
-        image, ground_truth, record = dataset.get_raw_sample(index)
-        started = time.perf_counter()
-        prediction = predict_pil(
-            model,
-            image,
-            device=device,
-            threshold=args.threshold,
-            tile_size=args.tile_size,
-            tile_overlap=args.tile_overlap,
-            max_size=args.max_size,
-        )
-        elapsed = time.perf_counter() - started
-        error = prediction.count - len(ground_truth)
-        errors.append(error)
-        rows.append(
-            {
-                "sample_id": record.sample_id,
-                "image": str(record.image_path),
-                "ground_truth_count": len(ground_truth),
-                "predicted_count": prediction.count,
-                "error": error,
-                "absolute_error": abs(error),
-                "squared_error": error * error,
-                "tiles": prediction.tiles,
-                "seconds": elapsed,
-            }
-        )
-        print(
-            f"[{index + 1}/{len(dataset)}] {record.sample_id}: "
-            f"gt={len(ground_truth)} pred={prediction.count} error={error:+d}"
-        )
-        if visual_dir and index < args.visualize_first:
-            canvas = draw_prediction(image, prediction, ground_truth=ground_truth)
-            safe_name = record.sample_id.replace("/", "_")
-            cv2.imwrite(str(visual_dir / f"{safe_name}.jpg"), canvas)
+    # Standalone evaluation already creates an eval-mode model, but training calls this
+    # function with its live train-mode model. Preserve and restore that state so VGG
+    # batch-normalization statistics are not changed by validation frames.
+    was_training = model.training
+    model.eval()
+    try:
+        for index in range(len(dataset)):
+            image, ground_truth, record = dataset.get_raw_sample(index)
+            started = time.perf_counter()
+            prediction = predict_pil(
+                model,
+                image,
+                device=device,
+                threshold=args.threshold,
+                tile_size=args.tile_size,
+                tile_overlap=args.tile_overlap,
+                max_size=args.max_size,
+            )
+            elapsed = time.perf_counter() - started
+            error = prediction.count - len(ground_truth)
+            errors.append(error)
+            rows.append(
+                {
+                    "sample_id": record.sample_id,
+                    "image": str(record.image_path),
+                    "ground_truth_count": len(ground_truth),
+                    "predicted_count": prediction.count,
+                    "error": error,
+                    "absolute_error": abs(error),
+                    "squared_error": error * error,
+                    "tiles": prediction.tiles,
+                    "seconds": elapsed,
+                }
+            )
+            print(
+                f"[{index + 1}/{len(dataset)}] {record.sample_id}: "
+                f"gt={len(ground_truth)} pred={prediction.count} error={error:+d}"
+            )
+            if visual_dir and index < args.visualize_first:
+                canvas = draw_prediction(image, prediction, ground_truth=ground_truth)
+                safe_name = record.sample_id.replace("/", "_")
+                cv2.imwrite(str(visual_dir / f"{safe_name}.jpg"), canvas)
+    finally:
+        if was_training:
+            model.train()
 
     error_array = np.asarray(errors, dtype=np.float64)
+    wall_seconds = time.perf_counter() - evaluation_started
+    inference_seconds = sum(row["seconds"] for row in rows)
+    split_file = getattr(args, "split_file", getattr(args, "val_split", ""))
+    frame_stride = getattr(args, "frame_stride", getattr(args, "val_frame_stride", 1))
     metrics = {
         "samples": len(rows),
         "mae": float(np.mean(np.abs(error_array))),
         "rmse": float(np.sqrt(np.mean(np.square(error_array)))),
         "mean_error": float(np.mean(error_array)),
         "threshold": args.threshold,
-        "split_file": args.split_file,
-        "frame_stride": args.frame_stride,
+        "split_file": split_file,
+        "frame_stride": frame_stride,
+        "wall_seconds": wall_seconds,
+        "inference_seconds": inference_seconds,
+        "seconds_per_sample": wall_seconds / len(rows) if rows else 0.0,
+        "samples_per_second": len(rows) / wall_seconds if wall_seconds > 0 else 0.0,
     }
     return metrics, rows
 

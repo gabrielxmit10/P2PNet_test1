@@ -50,7 +50,7 @@ Choose an output path with at least 11 GB free. From PowerShell:
 
 ```powershell
 tar.exe -cf "D:\TEMP\MovingDroneCrowd++.tar" `
-  -C "C:\Users\GabrielSchmitz\Downloads\UFRJ\00_IC\一00_Before\05_VisDrone_Dataset\MovingDroneCrowd" `
+  -C "C:\Users\GabrielSchmitz\Downloads\UFRJ\00_IC\90_Before\05_VisDrone_Dataset\MovingDroneCrowd" `
   "MovingDroneCrowd++"
 ```
 
@@ -80,6 +80,8 @@ My Drive/P2PNet_MDC/
         ├── checkpoints/
         ├── tensorboard/
         ├── run_config.json
+        ├── training_history.csv
+        ├── training_summary.json
         └── history.jsonl
 ```
 
@@ -91,31 +93,56 @@ model has been trained/fine-tuned on MDC.
 ## 2. Open and configure the notebook
 
 Open `colab_runner.ipynb` in VS Code, select the Google Colab GPU kernel, and
-change only the central configuration cell first:
+use the control panel at the top. The main selector is:
 
 ```python
-REPO_URL = "https://github.com/YOUR_ACCOUNT/YOUR_P2PNET_FORK.git"
-REPO_REF = "your-mdc-branch"
-DATASET_ARCHIVE = "/content/drive/MyDrive/P2PNet_MDC/data/MovingDroneCrowd++.tar"
-RUN_NAME = "p2pnet_mdc_run_001"
+ACTION = "inspect"  # inspect | smoke | benchmark | train | resume | evaluate | inference
 ```
 
-Run the setup/staging cells in order. After a runtime reset, repeat setup and
-dataset staging. Checkpoints in Drive survive the reset.
+Choose the initialization, run name, checkpoint, data split, and parameters in
+that same cell. Then run setup/staging, read the resolved preflight table, and
+run the single action cell. `inspect` is the safe default and does no model
+work. In Google Colab the `# @param` annotations may render as form controls;
+in the VS Code Colab extension they remain a clearly grouped Python form.
 
-## 3. Required validation order
+After a runtime reset, repeat setup and dataset staging. Checkpoints in Drive
+survive the reset. Local changes to this repository do not reach Colab until
+they are committed and pushed to the `REPO_URL`/`REPO_REF` selected above.
 
-Run these notebook sections before full training:
+The notebook deliberately separates automation from decisions. It automates
+repetitive work (commands, validation, checkpointing, timing, and plots), but
+the preflight table always shows the resolved inputs before an action runs.
+The user still chooses the action, initialization, crop/patch configuration,
+checkpoint, split, and final threshold.
+
+## 3. Recommended action order
+
+Use this order before and during the main run:
 
 1. Runtime/GPU report.
 2. Repository checkout and dependency installation.
 3. Dataset staging and `validate_mdc.py`.
 4. One annotated sample visualization.
-5. Model/dataset forward-backward `smoke_test.py`.
-6. Official-checkpoint single-image inference.
-7. Two-frame validation evaluation.
-8. One-batch, one-epoch training smoke run.
-9. Full training only after all previous cells succeed.
+5. Keep `ACTION="inspect"`, run the preflight, and read every resolved choice.
+6. Set `ACTION="smoke"`, rerun the preflight, and run the action. This checks one
+   training update, one validation frame, checkpoint creation, timing, and GPU
+   memory reporting with the currently selected configuration.
+7. Set `ACTION="benchmark"`. It runs short, separate technical trials of
+    `512 x 512, 1 patch` and `256 x 256, 4 patches`, then displays measured
+    time/memory and rough duration estimates. It does **not** decide which is
+    more accurate.
+8. Review the benchmark and choose `CROP_SIZE`/`NUM_PATCHES`. Keep the larger
+    crop when it fits comfortably and its runtime is acceptable; otherwise use
+    the smaller multi-patch option.
+9. Resolve initialization and weight-decay decisions, then use
+    `ACTION="train"` for the main run.
+10. During or after training, rerun the dashboard cell. Use `ACTION="resume"`
+    after a runtime interruption, `ACTION="evaluate"` for full validation,
+    and only unlock the test split after all choices are frozen.
+
+Sections 5–8 in the notebook are older diagnostics that were already exercised
+during development. `RUN_OPTIONAL_SETUP_DIAGNOSTICS=False` keeps them skipped,
+including when using **Run all**. They are not required for the guided flow.
 
 The verified local dataset statistics are:
 
@@ -129,6 +156,28 @@ There are two zero-person frames in the training split; the adapter supports
 them. No clip overlap was found between the three extended MDC++ splits.
 
 ## 4. Training
+
+For the normal notebook workflow, select:
+
+```python
+ACTION = "train"
+INITIALIZATION = "shanghaitech"  # or imagenet, scratch, custom
+```
+
+Read the preflight table and run the action cell. Training performs validation
+automatically at `EVAL_FREQ`; no manual validation cell is needed between
+epochs. With the notebook defaults, automatic early stopping is enabled only
+after 30 epochs and stops after four consecutive periodic validation checks
+without an MAE improvement. Since validation runs every five epochs, that is
+20 epochs without improvement. This is a safety rule, not a claim that those
+values are optimal.
+
+The dashboard reads `training_history.csv` (with JSONL as a fallback) and shows
+loss, periodic MAE/RMSE, epoch time, and peak GPU memory. Every row also records
+learning rates, optimizer steps, source frames/patches, validation throughput,
+the current best epoch, and the early-stopping counter. The best checkpoint's
+epoch and metrics are written to `best_checkpoint.json`; the final status is
+written to `training_summary.json`.
 
 ### Fine-tune from the included official P2PNet checkpoint
 
@@ -151,6 +200,9 @@ python train.py \
   --eval_freq 5 \
   --val_frame_stride 5 \
   --save_every 10 \
+  --early_stopping_patience 4 \
+  --early_stopping_min_epochs 30 \
+  --early_stopping_min_delta 0 \
   --num_workers 2 \
   --device cuda
 ```
@@ -167,6 +219,19 @@ make already-small drone heads disappear.
 results must use `evaluate.py --frame_stride 1` on the complete validation/test
 split.
 
+### What the smoke and benchmark actions mean
+
+- `smoke` is a correctness check, not a speed estimate or accuracy result. It
+  deliberately uses one training batch and one validation frame.
+- `benchmark` uses the real model/data path for a small fixed number of batches
+  and validation frames. Each candidate runs in a fresh process so a failed or
+  out-of-memory configuration does not contaminate the next one.
+- The benchmark table estimates one full training epoch and one periodic
+  validation pass from measured samples. Treat these as planning estimates;
+  Colab load, caching, and longer runs can change them.
+- A benchmark cannot determine whether `512 x 1` or `256 x 4` generalizes
+  better. That requires comparable training runs and validation results.
+
 ### Train from ImageNet VGG initialization
 
 Remove `--weights`. The default `--pretrained_backbone` then downloads the
@@ -175,17 +240,27 @@ initialization, also add `--no-pretrained_backbone`.
 
 ### Resume after a Colab reset
 
+In the notebook, choose `ACTION="resume"` and leave
+`RESUME_CHECKPOINT_CHOICE="latest"`. `EPOCHS` is the final total epoch number,
+not the number of extra epochs.
+
 Use the same run configuration and replace `--weights` with:
 
 ```bash
 --resume "/content/drive/MyDrive/P2PNet_MDC/runs/p2pnet_mdc_run_001/checkpoints/latest.pth"
 ```
 
-`latest.pth` contains model, optimizer, scheduler, epoch, best MAE, and the
-original arguments. `best_mae.pth` is also a complete checkpoint. `--weights`
-loads model parameters only; `--resume` restores the complete training state.
+`latest.pth` contains model, optimizer, scheduler, epoch, best MAE/best epoch,
+the early-stopping counter, and the original arguments. `best_mae.pth` is also
+a complete checkpoint. `--weights` loads model parameters only; `--resume`
+restores the complete training state, including early-stopping progress.
 
 ## 5. Validation and held-out testing
+
+In the notebook, choose `ACTION="evaluate"`, `CHECKPOINT_CHOICE="best"`, and
+`DATA_SPLIT="val"`. Evaluation writes a separate result directory whose name
+records the split, checkpoint choice, threshold, and frame stride. Selecting
+`DATA_SPLIT="test"` is blocked until `CONFIRM_FINAL_TEST=True`.
 
 Validation:
 
@@ -263,4 +338,3 @@ the two protocols within one experiment.
 - **Drive is slow:** verify that the dataset root is under `/content`, not the
   mounted Drive folder. Saving one checkpoint per epoch to Drive is acceptable;
   reading thousands of training images from Drive is not.
-

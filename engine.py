@@ -80,6 +80,8 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     max_steps: int = 0, print_freq: int = 20):
     model.train()
     criterion.train()
+    optimizer_steps = 0
+    patches_seen = 0
     metric_logger = utils.MetricLogger(delimiter="  ")
     metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
     # iterate all training samples
@@ -115,6 +117,8 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
         if max_norm > 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
         optimizer.step()
+        optimizer_steps += 1
+        patches_seen += len(targets)
         # update logger
         metric_logger.update(loss=loss_value, **loss_dict_reduced_scaled, **loss_dict_reduced_unscaled)
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
@@ -123,7 +127,10 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
     print("Averaged stats:", metric_logger)
-    return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
+    stats = {k: meter.global_avg for k, meter in metric_logger.meters.items()}
+    stats["optimizer_steps"] = optimizer_steps
+    stats["patches_seen"] = patches_seen
+    return stats
 
 # the inference routine
 @torch.no_grad()

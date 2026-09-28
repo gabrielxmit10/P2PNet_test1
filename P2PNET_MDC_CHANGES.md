@@ -43,9 +43,21 @@ Files: `train.py`, `smoke_test.py`, and `validate_mdc.py`.
   (complete recovery) semantics.
 - Added bounded sample/batch options for inexpensive tests.
 - Added configurable periodic tiled validation.
+- Added optional validation-MAE early stopping with a minimum-epoch guard,
+  configurable patience/minimum improvement, and resumable patience state.
+- Periodic validation now switches to evaluation mode without updating VGG
+  batch-normalization statistics, then restores training mode.
+- Training-time validation now correctly obtains the validation split and frame
+  stride from the training arguments.
 - Added dataset layout, split-overlap, annotation, frame-mapping, and image
   readability validation.
 - Records environment, command, Git revision, and complete configuration.
+- Writes `best_checkpoint.json` with the selected epoch, MAE/RMSE, threshold,
+  split, and frame stride alongside `best_mae.pth`.
+- Writes a human-readable `training_history.csv` plus JSONL with per-epoch
+  losses, learning rates, optimizer steps, time, validation throughput, and
+  peak CUDA-memory measurements. `training_summary.json` records why and when
+  a run finished.
 
 ### Colab orchestration
 
@@ -55,8 +67,21 @@ Files: `colab_runner.ipynb`, `requirements-colab.txt`, and
 - Stages code into `/content` from Git.
 - Mounts Drive, copies/extracts the dataset into `/content`, and checks disk.
 - Keeps checkpoints, TensorBoard data, metrics, and predictions in Drive.
-- Presents smoke inference, tiny evaluation/training, full training, resume,
-  final evaluation, and batch inference as separate cells.
+- Replaces several independent Boolean switches with one `ACTION` control:
+  inspect, smoke, benchmark, train, resume, evaluate, or inference.
+- Resolves initialization/checkpoint/split choices in a preflight table before
+  executing anything and guards the held-out test split behind confirmation.
+- Adds a training dashboard, best-checkpoint metadata display, worst-frame
+  evaluation table, and saved inference/evaluation visualization viewer.
+- The new smoke action exercises a 512-pixel batch and training-time periodic
+  validation rather than bypassing the validation path, and reports time and
+  memory diagnostics.
+- Adds a guided technical benchmark comparing `512 x 512, 1 patch` with
+  `256 x 256, 4 patches` in isolated short runs. It reports measured resource
+  use and rough full-run timing estimates without presenting them as accuracy
+  evidence.
+- Gates the older diagnostic cells behind one disabled-by-default switch, so
+  `ACTION="inspect"` remains non-training even when the notebook uses **Run all**.
 
 ## Important compatibility and correctness fixes
 
@@ -117,6 +142,9 @@ On Windows, Python 3.11, PyTorch 2.14 CPU, torchvision 0.29 CPU:
 - Two-frame MDC evaluation completed and saved metrics/per-frame results.
 - A one-batch training run saved a complete checkpoint.
 - A second run resumed optimizer/scheduler/epoch state from that checkpoint.
+- A bounded two-epoch run exercised history CSV creation, timing/memory fields,
+  automatic early stopping, summary creation, and persistence of the stopping
+  state in `latest.pth`.
 
 No claim is made that CPU smoke-test predictions are accurate on MDC. Accuracy
 requires MDC training and full GPU evaluation.
