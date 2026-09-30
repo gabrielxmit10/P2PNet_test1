@@ -110,9 +110,50 @@ def _torch_load(path: str):
         return torch.load(path, map_location="cpu")
 
 
-def _append_jsonl(path: Path, payload: dict):
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+def _flush_and_sync(handle):
+    """Flush a history file before its atomic replacement, including on Drive mounts."""
+    handle.flush()
+    try:
+        os.fsync(handle.fileno())
+    except OSError:
+        # Some mounted/cloud filesystems do not expose fsync. The atomic replace
+        # below still prevents a partially written file from becoming canonical.
+        pass
+
+
+def _read_history_jsonl(path: Path):
+    """Read normal or accidentally concatenated JSON objects from history.jsonl."""
+    if not path.is_file() or path.stat().st_size == 0:
+        return []
+    content = path.read_text(encoding="utf-8")
+    decoder = json.JSONDecoder()
+    records = []
+    position = 0
+    while position < len(content):
+        while position < len(content) and content[position].isspace():
+            position += 1
+        if position >= len(content):
+            break
+        try:
+            record, position = decoder.raw_decode(content, position)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"Cannot recover history JSON near character {exc.pos} in {path}"
+            ) from exc
+        if not isinstance(record, dict) or "epoch" not in record:
+            raise ValueError(f"Invalid history record in {path}: {record!r}")
+        records.append(record)
+    return records
+
+
+def _atomic_write_history_jsonl(path: Path, records):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    with temporary.open("w", encoding="utf-8", newline="\n") as handle:
+        for record in records:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+        _flush_and_sync(handle)
+    os.replace(temporary, path)
 
 
 HISTORY_FIELDS = [
@@ -131,10 +172,10 @@ HISTORY_FIELDS = [
 ]
 
 
-def _append_history_csv(path: Path, record: dict):
+def _history_csv_row(record: dict):
     train = record.get("train", {})
     validation = record.get("validation", {})
-    row = {
+    return {
         "epoch_index": record["epoch"],
         "epoch_number": record["epoch"] + 1,
         "train_loss": train.get("loss"),
@@ -168,12 +209,34 @@ def _append_history_csv(path: Path, record: dict):
         "bad_validation_checks": record.get("bad_validation_checks", 0),
         "early_stop_triggered": record.get("early_stop_triggered", False),
     }
-    write_header = not path.is_file() or path.stat().st_size == 0
-    with path.open("a", newline="", encoding="utf-8") as handle:
+
+
+def _atomic_write_history_csv(path: Path, records):
+    """Rewrite a complete rectangular CSV; never append to a possibly partial row."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    with temporary.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=HISTORY_FIELDS)
-        if write_header:
-            writer.writeheader()
-        writer.writerow(row)
+        writer.writeheader()
+        for record in records:
+            writer.writerow(_history_csv_row(record))
+        _flush_and_sync(handle)
+    os.replace(temporary, path)
+
+
+def _persist_history(jsonl_path: Path, csv_path: Path, record: dict):
+    """Upsert one epoch and atomically regenerate both durable history files."""
+    records_by_epoch = {
+        int(existing["epoch"]): existing
+        for existing in _read_history_jsonl(jsonl_path)
+    }
+    records_by_epoch[int(record["epoch"])] = record
+    ordered_records = [records_by_epoch[index] for index in sorted(records_by_epoch)]
+
+    # JSONL is canonical. If CSV replacement is interrupted, the next epoch or
+    # resumed run reconstructs CSV from the complete JSONL automatically.
+    _atomic_write_history_jsonl(jsonl_path, ordered_records)
+    _atomic_write_history_csv(csv_path, ordered_records)
 
 
 def _checkpoint_payload(
@@ -457,8 +520,7 @@ def main(args):
         record["best_epoch"] = best_epoch
         record["best_epoch_number"] = best_epoch + 1 if best_epoch is not None else None
         record["bad_validation_checks"] = bad_validation_checks
-        _append_jsonl(history_path, record)
-        _append_history_csv(history_csv_path, record)
+        _persist_history(history_path, history_csv_path, record)
         completed_epoch = epoch
         if writer:
             writer.add_scalar("timing/total_epoch_seconds", record["total_epoch_seconds"], epoch)
