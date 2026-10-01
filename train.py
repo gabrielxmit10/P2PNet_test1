@@ -543,12 +543,27 @@ def main(args):
     if writer:
         writer.close()
     total_training_seconds = time.time() - started
+
+    # The checkpoint is selected by validation MAE. Keep the RMSE and mean
+    # error measured during that same validation pass in the run summary so
+    # all three metrics unambiguously refer to the selected checkpoint.
+    best_rmse_at_best_mae = None
+    best_mean_error_at_best_mae = None
+    best_info_path = checkpoints_dir / "best_checkpoint.json"
+    if best_info_path.is_file():
+        best_info = json.loads(best_info_path.read_text(encoding="utf-8"))
+        best_validation = best_info.get("validation", {})
+        best_rmse_at_best_mae = best_validation.get("rmse")
+        best_mean_error_at_best_mae = best_validation.get("mean_error")
+
     summary = {
         "stop_reason": stop_reason,
         "completed_epoch_index": completed_epoch,
         "completed_epoch_number": completed_epoch + 1 if completed_epoch >= 0 else 0,
         "requested_epoch_ceiling": args.epochs,
         "best_mae": best_mae if np.isfinite(best_mae) else None,
+        "best_rmse_at_best_mae": best_rmse_at_best_mae,
+        "best_mean_error_at_best_mae": best_mean_error_at_best_mae,
         "best_epoch_index": best_epoch,
         "best_epoch_number": best_epoch + 1 if best_epoch is not None else None,
         "bad_validation_checks": bad_validation_checks,
